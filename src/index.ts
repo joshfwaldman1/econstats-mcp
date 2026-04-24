@@ -18,6 +18,22 @@ const FRED_KEY = process.env.FRED_API_KEY;
 const BLS_KEY = process.env.BLS_API_KEY;
 const BEA_KEY = process.env.BEA_API_KEY;
 
+// ── Cache ───────────────────────────────────────────────────────────────
+
+const cache = new Map<string, { data: string; expires: number }>();
+const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+
+function cacheGet(key: string): string | null {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expires) { cache.delete(key); return null; }
+  return entry.data;
+}
+
+function cacheSet(key: string, data: string) {
+  cache.set(key, { data, expires: Date.now() + CACHE_TTL });
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 async function fetchRetry(url: string | URL, init?: RequestInit): Promise<Response> {
@@ -38,6 +54,15 @@ async function fetchRetry(url: string | URL, init?: RequestInit): Promise<Respon
     }
   }
   throw new Error("fetchRetry exhausted");
+}
+
+async function cachedFetch(cacheKey: string, url: string | URL, init?: RequestInit): Promise<string> {
+  const hit = cacheGet(cacheKey);
+  if (hit) return hit;
+  const res = await fetchRetry(url, init);
+  const text = await res.text();
+  cacheSet(cacheKey, text);
+  return text;
 }
 
 function txt(text: string) { return { content: [{ type: "text" as const, text }] }; }
@@ -123,22 +148,25 @@ server.tool(
   },
   async ({ series_id, limit, units }) => {
     if (!FRED_KEY) return txt("FRED_API_KEY not configured");
-    const [obsRes, infoRes] = await Promise.all([
-      fetchRetry(`https://api.stlouisfed.org/fred/series/observations?series_id=${series_id}&api_key=${FRED_KEY}&file_type=json&sort_order=desc&limit=${limit}&units=${units}`),
-      fetchRetry(`https://api.stlouisfed.org/fred/series?series_id=${series_id}&api_key=${FRED_KEY}&file_type=json`),
+    const obsKey = `fred:${series_id}:${limit}:${units}`;
+    const infoKey = `fred:info:${series_id}`;
+
+    const [obsText, infoText] = await Promise.all([
+      cachedFetch(obsKey, `https://api.stlouisfed.org/fred/series/observations?series_id=${series_id}&api_key=${FRED_KEY}&file_type=json&sort_order=desc&limit=${limit}&units=${units}`),
+      cachedFetch(infoKey, `https://api.stlouisfed.org/fred/series?series_id=${series_id}&api_key=${FRED_KEY}&file_type=json`),
     ]);
-    if (!obsRes.ok) return txt(`FRED API error: ${obsRes.status}`);
-    const data = await obsRes.json();
+
+    const data = JSON.parse(obsText);
     if (data.error_code) return txt(data.error_message || `FRED error`);
 
     let title = series_id;
     let seriesUnits = "";
-    if (infoRes.ok) {
-      const info = await infoRes.json();
+    try {
+      const info = JSON.parse(infoText);
       const s = info.seriess?.[0];
       if (s?.title) title = s.title;
       if (s?.units) seriesUnits = s.units;
-    }
+    } catch {}
 
     // Reflect transformation in title
     const suffixes: Record<string, string> = { pc1: " (YoY % Change)", pch: " (% Change)", chg: " (Change)", ch1: " (Change from Year Ago)" };
@@ -163,10 +191,16 @@ server.tool(
   },
   async ({ series_ids, start_year, end_year }) => {
     const currentYear = new Date().getFullYear();
+    const sy = start_year ?? String(currentYear - 3);
+    const ey = end_year ?? String(currentYear);
+    const cacheKey = `bls:${series_ids.join(",")}:${sy}:${ey}`;
+    const cached = cacheGet(cacheKey);
+    if (cached) return txt(cached);
+
     const body: Record<string, unknown> = {
       seriesid: series_ids,
-      startyear: start_year ?? String(currentYear - 3),
-      endyear: end_year ?? String(currentYear),
+      startyear: sy,
+      endyear: ey,
       calculations: true,
       catalog: !series_ids.some(id => id.startsWith("JT")),
     };
@@ -214,7 +248,9 @@ server.tool(
       return `## ${label} (${sid})\nSource: https://data.bls.gov/timeseries/${sid}\n\n${lines}`;
     });
 
-    return txt(results.join("\n\n---\n\n") + "\n\n" + CITATION_RULE);
+    const output = results.join("\n\n---\n\n") + "\n\n" + CITATION_RULE;
+    cacheSet(cacheKey, output);
+    return txt(output);
   }
 );
 
@@ -479,9 +515,34 @@ server.tool(
   }
 );
 
+// ── Pre-fetch release-day series ────────────────────────────────────────
+
+async function prefetchReleaseDaySeries() {
+  if (!FRED_KEY) return;
+  const hotSeries = [
+    { id: "PAYEMS", units: "chg" },
+    { id: "UNRATE", units: "lin" },
+    { id: "CPIAUCSL", units: "pc1" },
+    { id: "CPILFESL", units: "pc1" },
+    { id: "GDPC1", units: "lin" },
+    { id: "A191RL1Q225SBEA", units: "lin" },
+    { id: "JTSJOL", units: "lin" },
+    { id: "PCEPILFE", units: "pc1" },
+  ];
+  console.error(`Pre-fetching ${hotSeries.length} release-day series...`);
+  for (const { id, units } of hotSeries) {
+    try {
+      const key = `fred:${id}:36:${units}`;
+      await cachedFetch(key, `https://api.stlouisfed.org/fred/series/observations?series_id=${id}&api_key=${FRED_KEY}&file_type=json&sort_order=desc&limit=36&units=${units}`);
+    } catch {}
+  }
+  console.error("Pre-fetch complete.");
+}
+
 // ── Start ───────────────────────────────────────────────────────────────
 
 const transport = new StdioServerTransport();
 server.connect(transport).then(() => {
   console.error("EconStats MCP v2 running on stdio");
+  prefetchReleaseDaySeries();
 });
