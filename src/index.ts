@@ -87,7 +87,7 @@ CES0500000003 (avg hourly earnings), RSAFS (retail sales), PSAVERT (savings rate
 
 server.tool(
   "fred_search",
-  "Search for FRED series by keyword. Returns series IDs with titles.",
+  "Search for FRED economic data series by keyword. FRED has 800K+ US series covering GDP, employment, inflation, interest rates, housing, trade, and more. Use this when you don't know the series ID. Common IDs you can use directly with fred_get_series: UNRATE (unemployment), PAYEMS (nonfarm payrolls), CPIAUCSL (CPI), PCEPILFE (core PCE), GDPC1 (real GDP), FEDFUNDS (fed funds rate), DGS10 (10yr Treasury), MORTGAGE30US (30yr mortgage), HOUST (housing starts), SP500 (S&P 500).",
   { query: z.string().describe("Search terms, e.g. 'housing starts' or 'consumer sentiment'") },
   async ({ query }) => {
     if (!FRED_KEY) return txt("FRED_API_KEY not configured");
@@ -104,7 +104,7 @@ server.tool(
 
 server.tool(
   "fred_get_series",
-  "Fetch FRED time series. Use units='pc1' for YoY % on index series (CPI, PCE, PPI). Use units='chg' for monthly change on employment.",
+  "Fetch FRED time series data with optional transformations. CRITICAL: For inflation indexes (CPIAUCSL, PCEPILFE, PPI), use units='pc1' to get year-over-year % change — raw index levels are meaningless to users. For employment (PAYEMS), use units='chg' to get monthly change in jobs. For rates (UNRATE, FEDFUNDS, DGS10), use units='lin' (default) since they're already in useful units. GDP: always use real GDP (GDPC1), never nominal.",
   {
     series_id: z.string().describe("FRED series ID, e.g. CPIAUCSL, UNRATE, GDPC1"),
     limit: z.number().default(36).describe("Observations (default 36 = 3 years monthly)"),
@@ -144,7 +144,7 @@ server.tool(
 
 server.tool(
   "bls_get_series",
-  "Fetch BLS data (CPI, employment, JOLTS, PPI). Returns pre-computed YoY% for CPI/PPI and monthly change for employment.",
+  "Fetch data direct from Bureau of Labor Statistics. Use instead of FRED when: (1) you need data on release day (BLS publishes at 8:30am ET, FRED lags 30-60 min), (2) you need metro-area CPI or state employment detail FRED doesn't have. Returns pre-computed YoY% for CPI/PPI indexes and monthly change for employment series automatically. For labor market analysis, consider fetching multiple series: unemployment (LNS14000000) + prime-age EPOP (LNS12300060) + job openings (JTS000000000000000JOL) gives a much fuller picture than unemployment alone.",
   {
     series_ids: z.array(z.string()).min(1).max(50).describe("BLS series IDs, e.g. ['CUSR0000SA0', 'CES0000000001']"),
     start_year: z.string().optional().describe("Start year, e.g. '2022'"),
@@ -209,7 +209,7 @@ server.tool(
 
 server.tool(
   "bls_series_lookup",
-  "Find BLS series IDs by keyword. Searches common CPI, employment, labor force, and JOLTS series. For niche series, try bls_catalog_search.",
+  "Find BLS series IDs by keyword. Has ~35 common series (CPI components, employment by industry, unemployment demographics, JOLTS). Also returns CPI metro area codes (S12A=NYC, S23A=Chicago, S49A=LA, etc.) for constructing regional CPI series IDs. Use this before bls_get_series when you don't know the ID.",
   { query: z.string().describe("Search terms, e.g. 'shelter CPI', 'construction employment', 'Black unemployment'") },
   async ({ query }) => {
     const catalog: Record<string, string> = {
@@ -287,7 +287,7 @@ server.tool(
 
 server.tool(
   "imf_get_data",
-  "Fetch IMF International Financial Statistics. Best for cross-country macro comparisons (recent quarterly/monthly data).",
+  "Fetch IMF International Financial Statistics. Best for cross-country macro comparisons with RECENT data (quarterly/monthly, few months lag). Use for: comparing inflation, GDP, exchange rates across countries. Common indicators: PCPI_PC_CP_A_PT (CPI % change), NGDP_XDC (nominal GDP), ENDA_XDC_USD_RATE (exchange rate). Country codes are ISO2 (US, GB, DE, JP, CN). For long-run structural data (poverty, education, demographics), use worldbank_get_data instead.",
   {
     database_id: z.enum(["IFS", "DOT", "BOP"]).describe("IFS=financial stats, DOT=trade, BOP=balance of payments"),
     frequency: z.enum(["A", "Q", "M"]).default("A"),
@@ -323,7 +323,7 @@ server.tool(
 
 server.tool(
   "worldbank_get_data",
-  "Fetch World Bank development indicators. Best for long-run cross-country data (annual, may lag 1-2 years).",
+  "Fetch World Bank development indicators. Best for long-run cross-country comparisons (annual data, may lag 1-2 years). Covers 200+ countries. Common indicators: NY.GDP.MKTP.KD.ZG (GDP growth %), FP.CPI.TOTL.ZG (inflation %), SL.UEM.TOTL.ZS (unemployment %), SP.POP.TOTL (population). Use 'WLD' for world aggregate, 'OED' for OECD. For recent/current data, use imf_get_data instead.",
   {
     country_codes: z.array(z.string()).describe("ISO2/ISO3 codes. 'WLD'=world, 'OED'=OECD"),
     indicator: z.string().describe("e.g. NY.GDP.MKTP.KD.ZG (GDP growth), FP.CPI.TOTL.ZG (inflation)"),
@@ -415,7 +415,7 @@ server.tool(
 
 server.tool(
   "inflation_adjust",
-  "Convert dollar amounts between dates using CPI-U. For 'what is $X worth today?', real wages, purchasing power.",
+  "Convert dollar amounts between dates using CPI-U. Use for: 'what is $X worth today?', real wages, inflation-adjusted prices, purchasing power comparisons. Returns the adjusted amount with source CPI values so the result is fully citable. Note: 'real wages' has multiple valid measures — this tool adjusts a single dollar amount, not a time series.",
   {
     amount: z.number().describe("Dollar amount to convert"),
     from_date: z.string().describe("Original date, YYYY-MM-01"),
