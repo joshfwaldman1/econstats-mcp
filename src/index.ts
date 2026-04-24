@@ -42,11 +42,13 @@ async function fetchRetry(url: string | URL, init?: RequestInit): Promise<Respon
 
 function txt(text: string) { return { content: [{ type: "text" as const, text }] }; }
 
+const CITATION_RULE = `CITATION RULE: Any number you state MUST come from this tool's data — NEVER from your training data. After every number, cite the source and date: (Source Name, Mon YYYY). Example: "unemployment was 4.3% (FRED: Unemployment Rate, Mar 2026)". If a number is not in the data above, do not state it.`;
+
 function cited(source: string, title: string, data: string) {
   return {
     content: [{
       type: "text" as const,
-      text: `SOURCE: ${title}\nURL: ${source}\nDATA:\n${data}\n\nCITATION RULE: When you use any number from the data above, you MUST write the source name in parentheses after it. Example: "unemployment was 4.3% (FRED: Unemployment Rate)". Never state a number from this data without attribution.`,
+      text: `SOURCE: ${title}\nURL: ${source}\n\n${data}\n\n${CITATION_RULE}`,
     }],
   };
 }
@@ -212,7 +214,7 @@ server.tool(
       return `## ${label} (${sid})\nSource: https://data.bls.gov/timeseries/${sid}\n\n${lines}`;
     });
 
-    return txt(results.join("\n\n---\n\n") + "\n\nCITATION RULE: When you use any number from above, attribute it to the source in parentheses, e.g. 'CPI rose 3.3% (BLS: CPI All Items)'.");
+    return txt(results.join("\n\n---\n\n") + "\n\n" + CITATION_RULE);
   }
 );
 
