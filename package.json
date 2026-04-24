@@ -1,0 +1,38 @@
+{
+  "name": "econstats-mcp",
+  "version": "2.0.0",
+  "description": "Economic data MCP server — FRED, BLS, BEA, IMF, World Bank, ECB with economist methodology guide",
+  "type": "module",
+  "bin": {
+    "econstats-mcp": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun src/index.ts",
+    "dev": "bun --watch src/index.ts"
+  },
+  "keywords": [
+    "mcp",
+    "economics",
+    "fred",
+    "bls",
+    "bea",
+    "imf",
+    "world-bank",
+    "ecb",
+    "inflation",
+    "economic-data",
+    "claude",
+    "openbb",
+    "model-context-protocol"
+  ],
+  "author": "Josh Waldman",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joshfwaldman1/econstats-mcp"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.3.6"
+  }
+}
