@@ -42,6 +42,15 @@ async function fetchRetry(url: string | URL, init?: RequestInit): Promise<Respon
 
 function txt(text: string) { return { content: [{ type: "text" as const, text }] }; }
 
+function cited(source: string, title: string, data: string) {
+  return {
+    content: [{
+      type: "text" as const,
+      text: `SOURCE: ${title}\nURL: ${source}\nDATA:\n${data}\n\nCITATION RULE: When you use any number from the data above, you MUST write the source name in parentheses after it. Example: "unemployment was 4.3% (FRED: Unemployment Rate)". Never state a number from this data without attribution.`,
+    }],
+  };
+}
+
 // ── Server ──────────────────────────────────────────────────────────────
 
 const server = new McpServer({
@@ -136,7 +145,7 @@ server.tool(
     const observations = (data.observations ?? []) as { date: string; value: string }[];
     const lines = observations.filter(o => o.value !== ".").map(o => `${o.date}: ${o.value}`).join("\n");
     const source = `https://fred.stlouisfed.org/series/${series_id}`;
-    return txt(`## ${title}\nSource: ${source}\nUnits: ${seriesUnits}\n\n${lines}`);
+    return cited(source, `FRED: ${title}`, lines);
   }
 );
 
@@ -203,7 +212,7 @@ server.tool(
       return `## ${label} (${sid})\nSource: https://data.bls.gov/timeseries/${sid}\n\n${lines}`;
     });
 
-    return txt(results.join("\n\n---\n\n"));
+    return txt(results.join("\n\n---\n\n") + "\n\nCITATION RULE: When you use any number from above, attribute it to the source in parentheses, e.g. 'CPI rose 3.3% (BLS: CPI All Items)'.");
   }
 );
 
