@@ -12,6 +12,8 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { createServer } from "node:http";
 import { z } from "zod";
 import { EconStatsCoreClient } from "./core/client";
 
@@ -227,10 +229,68 @@ server.tool(
 
 // ── Start ───────────────────────────────────────────────────────────────
 
-const transport = new StdioServerTransport();
-server.connect(transport).then(() => {
-  console.error("EconStats MCP v2 running on stdio");
-  if (process.env.PREFETCH_HOT_SERIES === "true") {
-    client.prefetchReleaseDaySeries();
-  }
-});
+const PORT = parseInt(process.env.MCP_PORT || process.env.PORT || "0");
+
+if (PORT > 0) {
+  // HTTP/SSE mode — for OpenBB and hosted deployments
+  const transports = new Map<string, SSEServerTransport>();
+
+  const httpServer = createServer(async (req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    if (req.url === "/health") {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("ok");
+      return;
+    }
+
+    if (req.url === "/sse" && req.method === "GET") {
+      const transport = new SSEServerTransport("/messages", res);
+      transports.set(transport.sessionId, transport);
+      transport.onclose = () => transports.delete(transport.sessionId);
+      await server.connect(transport);
+      return;
+    }
+
+    if (req.url?.startsWith("/messages") && req.method === "POST") {
+      const sessionId = new URL(req.url, `http://${req.headers.host}`).searchParams.get("sessionId");
+      const transport = sessionId ? transports.get(sessionId) : undefined;
+      if (!transport) {
+        res.writeHead(404);
+        res.end("Session not found");
+        return;
+      }
+      await transport.handlePostMessage(req, res);
+      return;
+    }
+
+    res.writeHead(404);
+    res.end("Not found");
+  });
+
+  httpServer.listen(PORT, () => {
+    console.error(`EconStats MCP v2 running on http://localhost:${PORT}`);
+    console.error(`  SSE endpoint: http://localhost:${PORT}/sse`);
+    console.error(`  Health check: http://localhost:${PORT}/health`);
+    if (process.env.PREFETCH_HOT_SERIES === "true") {
+      client.prefetchReleaseDaySeries();
+    }
+  });
+} else {
+  // Stdio mode — for Claude Desktop/Code
+  const transport = new StdioServerTransport();
+  server.connect(transport).then(() => {
+    console.error("EconStats MCP v2 running on stdio");
+    if (process.env.PREFETCH_HOT_SERIES === "true") {
+      client.prefetchReleaseDaySeries();
+    }
+  });
+}
