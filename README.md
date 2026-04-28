@@ -71,6 +71,35 @@ Connect as an MCP server in the OpenBB workspace AI settings.
 
 IMF, World Bank, and ECB need no keys.
 
+## Caching
+
+The server now uses a two-layer cache:
+
+- L1: in-process memory cache for hot repeated queries in a single MCP process
+- L2: optional shared Redis cache for cross-process or hosted deployments
+
+If you are running a shared MCP endpoint for OpenBB users, set these optional env vars:
+
+| Key | Required | Purpose |
+|-----|----------|---------|
+| `UPSTASH_REDIS_REST_URL` | Optional | Shared cache backend URL |
+| `UPSTASH_REDIS_REST_TOKEN` | Optional | Shared cache backend token |
+| `CACHE_NAMESPACE` | Optional | Cache prefix, defaults to `econstats:v2` |
+| `PREFETCH_HOT_SERIES` | Optional | Set to `true` only for long-lived hosted processes |
+
+TTL policy is source-aware:
+
+- Hot FRED series like `PAYEMS`, `UNRATE`, `CPIAUCSL`, `CPILFESL`, `PCEPILFE`: 15 minutes
+- Standard FRED series: 6 hours
+- BLS / BEA: 6-12 hours
+- IMF / ECB: 24 hours
+- World Bank and BLS lookup catalogs: days to weeks
+- Release calendar: 15 minutes
+
+The cache layer also deduplicates in-flight requests, so a burst of identical OpenBB tool calls only triggers one upstream API request.
+
+Startup prefetch is disabled by default because short-lived stdio clients can create unnecessary upstream traffic. Turn it on only when you are running a persistent shared MCP service.
+
 ## Tools (11)
 
 | Tool | Description |

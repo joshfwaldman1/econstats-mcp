@@ -13,70 +13,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-
-const FRED_KEY = process.env.FRED_API_KEY;
-const BLS_KEY = process.env.BLS_API_KEY;
-const BEA_KEY = process.env.BEA_API_KEY;
-
-// ── Cache ───────────────────────────────────────────────────────────────
-
-const cache = new Map<string, { data: string; expires: number }>();
-const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
-
-function cacheGet(key: string): string | null {
-  const entry = cache.get(key);
-  if (!entry) return null;
-  if (Date.now() > entry.expires) { cache.delete(key); return null; }
-  return entry.data;
-}
-
-function cacheSet(key: string, data: string) {
-  cache.set(key, { data, expires: Date.now() + CACHE_TTL });
-}
-
-// ── Helpers ─────────────────────────────────────────────────────────────
-
-async function fetchRetry(url: string | URL, init?: RequestInit): Promise<Response> {
-  for (let attempt = 0; attempt <= 2; attempt++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
-    try {
-      const res = await fetch(url, { ...init, signal: controller.signal });
-      clearTimeout(timer);
-      if (res.status === 429 || res.status >= 500) {
-        if (attempt < 2) { await new Promise((r) => setTimeout(r, 1000 * (attempt + 1))); continue; }
-      }
-      return res;
-    } catch (err) {
-      clearTimeout(timer);
-      if (attempt < 2) await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
-      else throw err;
-    }
-  }
-  throw new Error("fetchRetry exhausted");
-}
-
-async function cachedFetch(cacheKey: string, url: string | URL, init?: RequestInit): Promise<string> {
-  const hit = cacheGet(cacheKey);
-  if (hit) return hit;
-  const res = await fetchRetry(url, init);
-  const text = await res.text();
-  cacheSet(cacheKey, text);
-  return text;
-}
+import { EconStatsCoreClient } from "./core/client";
 
 function txt(text: string) { return { content: [{ type: "text" as const, text }] }; }
-
-const CITATION_RULE = `CITATION RULE: Any number you state MUST come from this tool's data — NEVER from your training data. After every number, cite the source and date: (Source Name, Mon YYYY). Example: "unemployment was 4.3% (FRED: Unemployment Rate, Mar 2026)". If a number is not in the data above, do not state it.`;
-
-function cited(source: string, title: string, data: string) {
-  return {
-    content: [{
-      type: "text" as const,
-      text: `SOURCE: ${title}\nURL: ${source}\n\n${data}\n\n${CITATION_RULE}`,
-    }],
-  };
-}
+const client = new EconStatsCoreClient();
 
 // ── Server ──────────────────────────────────────────────────────────────
 
@@ -126,15 +66,7 @@ server.tool(
   "Search for FRED economic data series by keyword. FRED has 800K+ US series covering GDP, employment, inflation, interest rates, housing, trade, and more. Use this when you don't know the series ID. Common IDs you can use directly with fred_get_series: UNRATE (unemployment), PAYEMS (nonfarm payrolls), CPIAUCSL (CPI), PCEPILFE (core PCE), GDPC1 (real GDP), FEDFUNDS (fed funds rate), DGS10 (10yr Treasury), MORTGAGE30US (30yr mortgage), HOUST (housing starts), SP500 (S&P 500).",
   { query: z.string().describe("Search terms, e.g. 'housing starts' or 'consumer sentiment'") },
   async ({ query }) => {
-    if (!FRED_KEY) return txt("FRED_API_KEY not configured");
-    const res = await fetchRetry(
-      `https://api.stlouisfed.org/fred/series/search?search_text=${encodeURIComponent(query)}&api_key=${FRED_KEY}&file_type=json&limit=8`
-    );
-    const data = await res.json();
-    const results = data.seriess?.map((s: { id: string; title: string; frequency: string; units: string }) =>
-      `${s.id}: ${s.title} (${s.frequency}, ${s.units})`
-    ).join("\n") ?? "No results";
-    return txt(results);
+    return txt(await client.fredSearch(query));
   }
 );
 
@@ -147,35 +79,7 @@ server.tool(
     units: z.enum(["lin", "pc1", "pch", "ch1", "chg"]).default("lin").describe("lin=levels, pc1=YoY%, pch=MoM%, chg=change"),
   },
   async ({ series_id, limit, units }) => {
-    if (!FRED_KEY) return txt("FRED_API_KEY not configured");
-    const obsKey = `fred:${series_id}:${limit}:${units}`;
-    const infoKey = `fred:info:${series_id}`;
-
-    const [obsText, infoText] = await Promise.all([
-      cachedFetch(obsKey, `https://api.stlouisfed.org/fred/series/observations?series_id=${series_id}&api_key=${FRED_KEY}&file_type=json&sort_order=desc&limit=${limit}&units=${units}`),
-      cachedFetch(infoKey, `https://api.stlouisfed.org/fred/series?series_id=${series_id}&api_key=${FRED_KEY}&file_type=json`),
-    ]);
-
-    const data = JSON.parse(obsText);
-    if (data.error_code) return txt(data.error_message || `FRED error`);
-
-    let title = series_id;
-    let seriesUnits = "";
-    try {
-      const info = JSON.parse(infoText);
-      const s = info.seriess?.[0];
-      if (s?.title) title = s.title;
-      if (s?.units) seriesUnits = s.units;
-    } catch {}
-
-    // Reflect transformation in title
-    const suffixes: Record<string, string> = { pc1: " (YoY % Change)", pch: " (% Change)", chg: " (Change)", ch1: " (Change from Year Ago)" };
-    if (units !== "lin" && suffixes[units]) title += suffixes[units];
-
-    const observations = (data.observations ?? []) as { date: string; value: string }[];
-    const lines = observations.filter(o => o.value !== ".").map(o => `${o.date}: ${o.value}`).join("\n");
-    const source = `https://fred.stlouisfed.org/series/${series_id}`;
-    return cited(source, `FRED: ${title}`, lines);
+    return txt(await client.fredGetSeries(series_id, limit, units));
   }
 );
 
@@ -190,67 +94,7 @@ server.tool(
     end_year: z.string().optional().describe("End year, e.g. '2026'"),
   },
   async ({ series_ids, start_year, end_year }) => {
-    const currentYear = new Date().getFullYear();
-    const sy = start_year ?? String(currentYear - 3);
-    const ey = end_year ?? String(currentYear);
-    const cacheKey = `bls:${series_ids.join(",")}:${sy}:${ey}`;
-    const cached = cacheGet(cacheKey);
-    if (cached) return txt(cached);
-
-    const body: Record<string, unknown> = {
-      seriesid: series_ids,
-      startyear: sy,
-      endyear: ey,
-      calculations: true,
-      catalog: !series_ids.some(id => id.startsWith("JT")),
-    };
-    if (BLS_KEY) body.registrationkey = BLS_KEY;
-
-    const res = await fetchRetry("https://api.bls.gov/publicAPI/v2/timeseries/data/", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) return txt(`BLS API error: ${res.status}`);
-    const data = await res.json();
-    if (data.status !== "REQUEST_SUCCEEDED") return txt(data.message?.join("; ") ?? "BLS error");
-
-    const results = (data.Results?.series ?? []).map((s: {
-      seriesID: string;
-      catalog?: { series_title?: string };
-      data: { year: string; period: string; value: string; calculations?: { pct_changes?: Record<string, string>; net_changes?: Record<string, string> } }[];
-    }) => {
-      const sid = s.seriesID;
-      const isIndex = sid.startsWith("CU") || sid.startsWith("WP") || sid.startsWith("PC");
-      const isEmployment = sid.startsWith("CE") || sid.startsWith("SM");
-      const title = s.catalog?.series_title ?? sid;
-
-      const lines = s.data
-        .filter(d => d.period !== "M13" && d.value !== "-" && d.value !== "")
-        .map(d => {
-          const date = d.period.startsWith("M") ? `${d.year}-${d.period.slice(1)}` : d.year;
-          let display = d.value;
-          if (isIndex) {
-            const yoy = d.calculations?.pct_changes?.["12"];
-            if (yoy && yoy !== "") display = `${yoy}% YoY (index: ${d.value})`;
-          } else if (isEmployment) {
-            const chg = d.calculations?.net_changes?.["1"];
-            if (chg && chg !== "") display = `${chg} change (level: ${d.value})`;
-          }
-          return `${date}: ${display}`;
-        })
-        .join("\n");
-
-      let label = title;
-      if (isIndex) label += " (YoY % Change)";
-      else if (isEmployment) label += " (Monthly Change)";
-
-      return `## ${label} (${sid})\nSource: https://data.bls.gov/timeseries/${sid}\n\n${lines}`;
-    });
-
-    const output = results.join("\n\n---\n\n") + "\n\n" + CITATION_RULE;
-    cacheSet(cacheKey, output);
-    return txt(output);
+    return txt(await client.blsGetSeries(series_ids, start_year, end_year));
   }
 );
 
@@ -259,38 +103,7 @@ server.tool(
   "Find BLS series IDs by keyword. Has ~35 common series (CPI components, employment by industry, unemployment demographics, JOLTS). Also returns CPI metro area codes (S12A=NYC, S23A=Chicago, S49A=LA, etc.) for constructing regional CPI series IDs. Use this before bls_get_series when you don't know the ID.",
   { query: z.string().describe("Search terms, e.g. 'shelter CPI', 'construction employment', 'Black unemployment'") },
   async ({ query }) => {
-    const catalog: Record<string, string> = {
-      "CUSR0000SA0": "CPI All items, US, SA",
-      "CUSR0000SA0L1E": "CPI Core (less food and energy), US, SA",
-      "CUSR0000SAH1": "CPI Shelter, US, SA",
-      "CUSR0000SAF11": "CPI Food at home, US, SA",
-      "CUSR0000SAM": "CPI Medical care, US, SA",
-      "CUSR0000SAT": "CPI Transportation, US, SA",
-      "CUSR0000SETB01": "CPI Gasoline, US, SA",
-      "CUSR0000SEHA": "CPI Rent of primary residence, US, SA",
-      "CUSR0000SEHC": "CPI Owners equivalent rent, US, SA",
-      "CES0000000001": "Total nonfarm employment, SA",
-      "CES0500000003": "Avg hourly earnings, all private, SA",
-      "CES2000000001": "Construction employment, SA",
-      "CES3000000001": "Manufacturing employment, SA",
-      "CES6562000001": "Health care employment, SA",
-      "CES7000000001": "Leisure and hospitality employment, SA",
-      "LNS14000000": "Unemployment rate (U-3), SA",
-      "LNS13327709": "U-6 underemployment rate, SA",
-      "LNS12300060": "Prime-age (25-54) EPOP, SA",
-      "LNS14000006": "Unemployment rate, Black, SA",
-      "LNS14000009": "Unemployment rate, Hispanic, SA",
-      "JTS000000000000000JOL": "Job openings, total nonfarm",
-      "JTS000000000000000QUL": "Quits, total nonfarm",
-    };
-    const terms = query.toLowerCase().split(/\s+/).filter(t => t.length > 1);
-    const matches = Object.entries(catalog)
-      .filter(([, t]) => terms.every(term => t.toLowerCase().includes(term)))
-      .map(([id, t]) => `${id}: ${t}`);
-
-    const cpiRef = "CPI area codes: S12A=NYC, S11A=Boston, S23A=Chicago, S23B=Detroit, S35A=DC, S35B=Miami, S37A=Dallas, S37B=Houston, S49A=LA, S49B=SF, S49D=Seattle. Format: CU+UR/SR+area+item. Example: CUURS12ASAF11 = NYC Food at home";
-
-    return txt(matches.length > 0 ? matches.join("\n") + "\n\n" + cpiRef : "No matches in quick catalog.\n\n" + cpiRef);
+    return txt(await client.blsSeriesLookup(query));
   }
 );
 
@@ -306,27 +119,7 @@ server.tool(
     year: z.string().default("LAST5"),
   },
   async ({ dataset, table_name, frequency, year }) => {
-    if (!BEA_KEY) return txt("BEA_API_KEY not configured");
-    const params = new URLSearchParams({ UserID: BEA_KEY, method: "GetData", DataSetName: dataset, TableName: table_name, Frequency: frequency, Year: year, ResultFormat: "JSON" });
-    const res = await fetchRetry(`https://apps.bea.gov/api/data/?${params}`);
-    if (!res.ok) return txt(`BEA API error: ${res.status}`);
-    const data = await res.json();
-    const beaData = data?.BEAAPI?.Results;
-    if (beaData?.Error) return txt(beaData.Error.APIErrorDescription ?? "BEA error");
-
-    const rows = (beaData?.Data ?? []) as { LineDescription: string; TimePeriod: string; DataValue: string }[];
-    const byLine = new Map<string, string[]>();
-    for (const r of rows) {
-      const key = r.LineDescription ?? "Data";
-      if (!byLine.has(key)) byLine.set(key, []);
-      const val = r.DataValue?.replace(/,/g, "");
-      if (val && val !== "---") byLine.get(key)!.push(`${r.TimePeriod}: ${val}`);
-    }
-
-    const results = Array.from(byLine.entries()).slice(0, 15).map(([line, obs]) =>
-      `## BEA: ${line}\n${obs.join("\n")}`
-    );
-    return txt(results.join("\n\n"));
+    return txt(await client.beaGetData(dataset, table_name, frequency, year));
   }
 );
 
@@ -344,25 +137,14 @@ server.tool(
     end_period: z.string().optional(),
   },
   async ({ database_id, frequency, country_codes, indicator, start_period, end_period }) => {
-    const url = new URL(`https://dataservices.imf.org/REST/SDMX_JSON.svc/CompactData/${database_id}/${frequency}.${country_codes.join("+")}.${indicator}`);
-    if (start_period) url.searchParams.set("startPeriod", start_period);
-    if (end_period) url.searchParams.set("endPeriod", end_period);
-
-    const res = await fetchRetry(url.toString());
-    if (!res.ok) return txt(`IMF API error: ${res.status}`);
-    const data = await res.json();
-    const dataset = data?.CompactData?.DataSet;
-    if (!dataset) return txt("No data from IMF");
-
-    const raw = dataset.Series;
-    const arr = Array.isArray(raw) ? raw : raw ? [raw] : [];
-    const results = arr.map((s: { "@REF_AREA": string; "@INDICATOR": string; Obs: unknown }) => {
-      const obs = Array.isArray(s.Obs) ? s.Obs : s.Obs ? [s.Obs] : [];
-      const lines = obs.map((o: { "@TIME_PERIOD": string; "@OBS_VALUE": string }) =>
-        `${o["@TIME_PERIOD"]}: ${o["@OBS_VALUE"]}`).join("\n");
-      return `## IMF: ${s["@INDICATOR"]} (${s["@REF_AREA"]})\n${lines}`;
-    });
-    return txt(results.join("\n\n"));
+    return txt(await client.imfGetData({
+      databaseId: database_id,
+      frequency,
+      countryCodes: country_codes,
+      indicator,
+      startPeriod: start_period,
+      endPeriod: end_period,
+    }));
   }
 );
 
@@ -378,28 +160,12 @@ server.tool(
     end_year: z.number().optional(),
   },
   async ({ country_codes, indicator, start_year, end_year }) => {
-    const url = new URL(`https://api.worldbank.org/v2/country/${country_codes.join(";")}/indicator/${indicator}`);
-    url.searchParams.set("format", "json");
-    url.searchParams.set("per_page", "100");
-    if (start_year) url.searchParams.set("date", `${start_year}:${end_year ?? 2025}`);
-
-    const res = await fetchRetry(url.toString());
-    if (!res.ok) return txt(`World Bank API error: ${res.status}`);
-    const data = await res.json();
-    if (!Array.isArray(data) || data.length < 2) return txt("No data");
-
-    const rows = (data[1] ?? []) as { country: { value: string }; date: string; value: number | null }[];
-    const byCountry = new Map<string, string[]>();
-    for (const r of rows) {
-      if (r.value == null) continue;
-      const key = r.country?.value ?? "Unknown";
-      if (!byCountry.has(key)) byCountry.set(key, []);
-      byCountry.get(key)!.push(`${r.date}: ${r.value}`);
-    }
-    const results = Array.from(byCountry.entries()).map(([country, obs]) =>
-      `## ${indicator} — ${country}\nSource: https://data.worldbank.org/indicator/${indicator}\n\n${obs.reverse().join("\n")}`
-    );
-    return txt(results.join("\n\n"));
+    return txt(await client.worldBankGetData({
+      countryCodes: country_codes,
+      indicator,
+      startYear: start_year,
+      endYear: end_year,
+    }));
   }
 );
 
@@ -408,16 +174,7 @@ server.tool(
   "Search World Bank indicators by keyword.",
   { query: z.string().describe("e.g. 'GDP growth', 'poverty rate', 'CO2 emissions'") },
   async ({ query }) => {
-    const url = new URL("https://api.worldbank.org/v2/indicator");
-    url.searchParams.set("format", "json");
-    url.searchParams.set("per_page", "10");
-    url.searchParams.set("q", query);
-    const res = await fetchRetry(url.toString());
-    if (!res.ok) return txt(`World Bank error: ${res.status}`);
-    const data = await res.json();
-    if (!Array.isArray(data) || data.length < 2) return txt("No results");
-    const indicators = (data[1] ?? []).map((i: { id: string; name: string }) => `${i.id}: ${i.name}`).join("\n");
-    return txt(indicators || "No results");
+    return txt(await client.worldBankSearch(query));
   }
 );
 
@@ -433,28 +190,12 @@ server.tool(
     end_period: z.string().optional(),
   },
   async ({ flow_ref, key, start_period, end_period }) => {
-    const url = new URL(`https://data-api.ecb.europa.eu/service/data/${flow_ref}/${key}`);
-    url.searchParams.set("format", "jsondata");
-    if (start_period) url.searchParams.set("startPeriod", start_period);
-    if (end_period) url.searchParams.set("endPeriod", end_period);
-
-    const res = await fetchRetry(url.toString(), { headers: { Accept: "application/json" } });
-    if (!res.ok) return txt(`ECB API error: ${res.status}`);
-    const data = await res.json();
-    const dataset = data?.dataSets?.[0];
-    if (!dataset?.series) return txt("No ECB data");
-
-    const timeDim = data?.structure?.dimensions?.observation?.find((d: { id: string }) => d.id === "TIME_PERIOD");
-    const times: string[] = timeDim?.values?.map((v: { id: string }) => v.id) ?? [];
-
-    const results = Object.entries(dataset.series).map(([, sd]: [string, unknown]) => {
-      const s = sd as { observations: Record<string, [number]> };
-      const lines = Object.entries(s.observations ?? {})
-        .map(([idx, vals]) => `${times[Number(idx)] ?? idx}: ${vals[0]}`)
-        .join("\n");
-      return `## ECB: ${flow_ref}/${key}\n${lines}`;
-    });
-    return txt(results.join("\n\n"));
+    return txt(await client.ecbGetData({
+      flowRef: flow_ref,
+      key,
+      startPeriod: start_period,
+      endPeriod: end_period,
+    }));
   }
 );
 
@@ -469,18 +210,7 @@ server.tool(
     to_date: z.string().describe("Target date, YYYY-MM-01"),
   },
   async ({ amount, from_date, to_date }) => {
-    if (!FRED_KEY) return txt("FRED_API_KEY not configured");
-    const [fromRes, toRes] = await Promise.all([
-      fetchRetry(`https://api.stlouisfed.org/fred/series/observations?series_id=CPIAUCNS&api_key=${FRED_KEY}&file_type=json&observation_start=${from_date}&observation_end=${from_date}&limit=1`),
-      fetchRetry(`https://api.stlouisfed.org/fred/series/observations?series_id=CPIAUCNS&api_key=${FRED_KEY}&file_type=json&observation_start=${to_date}&observation_end=${to_date}&limit=1`),
-    ]);
-    const fromData = await fromRes.json();
-    const toData = await toRes.json();
-    const fromCPI = parseFloat(fromData.observations?.[0]?.value);
-    const toCPI = parseFloat(toData.observations?.[0]?.value);
-    if (isNaN(fromCPI) || isNaN(toCPI)) return txt("CPI data not available for requested dates");
-    const adjusted = amount * (toCPI / fromCPI);
-    return txt(`$${amount} from ${from_date} = $${(Math.round(adjusted * 100) / 100).toFixed(2)} in ${to_date} dollars\nCPI ${from_date}: ${fromCPI}\nCPI ${to_date}: ${toCPI}\nCumulative inflation: ${(Math.round(((toCPI / fromCPI) - 1) * 10000) / 100).toFixed(1)}%`);
+    return txt(await client.inflationAdjust(amount, from_date, to_date));
   }
 );
 
@@ -491,58 +221,16 @@ server.tool(
   "Check if today is a major economic data release day (jobs, CPI, GDP, etc). If yes, use BLS/BEA direct instead of FRED.",
   {},
   async () => {
-    if (!FRED_KEY) return txt("FRED_API_KEY not configured");
-    const releases = [
-      { id: 50, name: "Employment Situation", source: "BLS" },
-      { id: 10, name: "CPI", source: "BLS" },
-      { id: 46, name: "PPI", source: "BLS" },
-      { id: 53, name: "GDP", source: "BEA" },
-      { id: 54, name: "Personal Income", source: "BEA" },
-      { id: 127, name: "JOLTS", source: "BLS" },
-    ];
-    const today = new Date().toISOString().slice(0, 10);
-    const results: string[] = [];
-    for (const rel of releases) {
-      try {
-        const res = await fetchRetry(`https://api.stlouisfed.org/fred/release/dates?release_id=${rel.id}&api_key=${FRED_KEY}&file_type=json&sort_order=desc&limit=3`);
-        const data = await res.json();
-        const dates = data.release_dates?.map((d: { date: string }) => d.date) ?? [];
-        const isToday = dates.includes(today);
-        results.push(`${rel.name}: last=${dates[0] ?? "?"} ${isToday ? "** RELEASED TODAY — use " + rel.source + " direct **" : ""}`);
-      } catch {}
-    }
-    return txt(`Today: ${today}\n\n${results.join("\n")}`);
+    return txt(await client.checkReleaseCalendar());
   }
 );
-
-// ── Pre-fetch release-day series ────────────────────────────────────────
-
-async function prefetchReleaseDaySeries() {
-  if (!FRED_KEY) return;
-  const hotSeries = [
-    { id: "PAYEMS", units: "chg" },
-    { id: "UNRATE", units: "lin" },
-    { id: "CPIAUCSL", units: "pc1" },
-    { id: "CPILFESL", units: "pc1" },
-    { id: "GDPC1", units: "lin" },
-    { id: "A191RL1Q225SBEA", units: "lin" },
-    { id: "JTSJOL", units: "lin" },
-    { id: "PCEPILFE", units: "pc1" },
-  ];
-  console.error(`Pre-fetching ${hotSeries.length} release-day series...`);
-  for (const { id, units } of hotSeries) {
-    try {
-      const key = `fred:${id}:36:${units}`;
-      await cachedFetch(key, `https://api.stlouisfed.org/fred/series/observations?series_id=${id}&api_key=${FRED_KEY}&file_type=json&sort_order=desc&limit=36&units=${units}`);
-    } catch {}
-  }
-  console.error("Pre-fetch complete.");
-}
 
 // ── Start ───────────────────────────────────────────────────────────────
 
 const transport = new StdioServerTransport();
 server.connect(transport).then(() => {
   console.error("EconStats MCP v2 running on stdio");
-  prefetchReleaseDaySeries();
+  if (process.env.PREFETCH_HOT_SERIES === "true") {
+    client.prefetchReleaseDaySeries();
+  }
 });
