@@ -234,10 +234,10 @@ const PORT = parseInt(process.env.MCP_PORT || process.env.PORT || "0");
 
 if (PORT > 0) {
   // Streamable HTTP mode — for OpenBB Workspace
+  // Use stateless mode so each request is independent
   const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
+    sessionIdGenerator: undefined,
   });
-
   await server.connect(transport);
 
   const httpServer = createServer(async (req, res) => {
@@ -258,8 +258,14 @@ if (PORT > 0) {
       return;
     }
 
-    // All MCP traffic goes through the transport
-    await transport.handleRequest(req, res);
+    try {
+      await transport.handleRequest(req, res);
+    } catch (err) {
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(err) }));
+      }
+    }
   });
 
   httpServer.listen(PORT, () => {
