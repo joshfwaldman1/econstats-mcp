@@ -12,8 +12,9 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { EconStatsCoreClient } from "./core/client";
 
@@ -232,13 +233,18 @@ server.tool(
 const PORT = parseInt(process.env.MCP_PORT || process.env.PORT || "0");
 
 if (PORT > 0) {
-  // HTTP/SSE mode — for OpenBB and hosted deployments
-  const transports = new Map<string, SSEServerTransport>();
+  // Streamable HTTP mode — for OpenBB Workspace
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+  });
+
+  await server.connect(transport);
 
   const httpServer = createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, mcp-session-id");
+    res.setHeader("Access-Control-Expose-Headers", "mcp-session-id");
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -252,34 +258,12 @@ if (PORT > 0) {
       return;
     }
 
-    if (req.url === "/sse" && req.method === "GET") {
-      const transport = new SSEServerTransport("/messages", res);
-      transports.set(transport.sessionId, transport);
-      transport.onclose = () => transports.delete(transport.sessionId);
-      await server.connect(transport);
-      return;
-    }
-
-    if (req.url?.startsWith("/messages") && req.method === "POST") {
-      const sessionId = new URL(req.url, `http://${req.headers.host}`).searchParams.get("sessionId");
-      const transport = sessionId ? transports.get(sessionId) : undefined;
-      if (!transport) {
-        res.writeHead(404);
-        res.end("Session not found");
-        return;
-      }
-      await transport.handlePostMessage(req, res);
-      return;
-    }
-
-    res.writeHead(404);
-    res.end("Not found");
+    // All MCP traffic goes through the transport
+    await transport.handleRequest(req, res);
   });
 
   httpServer.listen(PORT, () => {
-    console.error(`EconStats MCP v2 running on http://localhost:${PORT}`);
-    console.error(`  SSE endpoint: http://localhost:${PORT}/sse`);
-    console.error(`  Health check: http://localhost:${PORT}/health`);
+    console.error(`EconStats MCP v2 running on http://localhost:${PORT} (Streamable HTTP)`);
     if (process.env.PREFETCH_HOT_SERIES === "true") {
       client.prefetchReleaseDaySeries();
     }
